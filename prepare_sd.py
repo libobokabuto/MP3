@@ -73,6 +73,20 @@ FONT_RANGES = [
 COVER_EXT = ".cov"
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif")
 
+# ============================================================================
+# 默认路径
+# ============================================================================
+#
+# 工作方式：读左边，写右边。
+#   D:\software\Music          放 mp3（平铺就行，播放器只扫 SD 卡根目录，不支持子文件夹）
+#   E:\Study\codes\Mp3\sd_ready  放产出（font16.bin + 一堆 <歌名>.cov）
+#
+# 直接跑  python prepare_sd.py  或双击 一键备卡.cmd 回车，用的就是这两个目录。
+# 想临时换：命令行加 --music / --out，或者在交互式里直接输入路径。
+
+DEFAULT_MUSIC_DIR = Path(r"D:\software\Music")
+DEFAULT_OUT_DIR = Path(r"E:\Study\codes\Mp3\sd_ready")
+
 
 def log(msg=""):
     print(msg, flush=True)
@@ -255,10 +269,23 @@ def list_mp3_files(music_dir):
     return [found[key] for key in sorted(found)]
 
 
+def report_where_the_songs_are(music_dir):
+    """目录里没找到 mp3 时，帮忙查一下为什么。"""
+    log(f"  ⚠ {music_dir} 里没有 .mp3")
+
+    ncm_count = sum(1 for entry in music_dir.iterdir()
+                    if entry.is_file() and entry.suffix.lower() == ".ncm")
+
+    if ncm_count:
+        log()
+        log(f"     这里有 {ncm_count} 个 .ncm 文件。")
+        log("     .ncm 是云音乐的加密格式，必须先转成 .mp3 播放器才认。")
+
+
 def process_covers(music_dir, out_dir, size):
     mp3_files = list_mp3_files(music_dir)
     if not mp3_files:
-        log(f"  ⚠ {music_dir} 里没有 .mp3")
+        report_where_the_songs_are(music_dir)
         return 0, 0
 
     made = 0
@@ -302,31 +329,46 @@ def process_covers(music_dir, out_dir, size):
 # ============================================================================
 
 
-def ask_for_sd_drive():
-    """交互式问用户要 SD 卡盘符。给双击运行的 一键备卡.cmd 用。
+def ask_for_target():
+    """交互式问用户要处理哪个目录。给双击运行的 一键备卡.cmd 用。
 
     所有中文都从 Python 输出，而不是写在 .cmd 里 ——
     cmd.exe 解析 UTF-8 批处理文件不可靠，中文行会被当成命令报错。
     """
     print("=" * 64)
-    print("  MP3 播放器 —— SD 卡一键备卡")
+    print("  MP3 播放器 —— 一键备卡")
     print("=" * 64)
     print()
-    print("  用法：先把 SD 卡插到电脑的读卡器上，再运行本程序。")
-    print("  脚本会直接读写这张卡 —— 扫卡里的 mp3、抠封面、生成字库，")
-    print("  全部原地完成，不会出现「封面和歌名对不上」的问题。")
+    print("  直接回车 = 用下面的默认设置：")
     print()
-    print("  盘符就是「此电脑」里那张卡显示的那个字母，比如 F、G、H。")
+    print(f"    歌曲目录（读）: {DEFAULT_MUSIC_DIR}")
+    print(f"    输出目录（写）: {DEFAULT_OUT_DIR}")
+    print()
+    print("  也可以输入：")
+    print("    · SD 卡盘符（比如 F）  —— 直接对卡操作，字库和封面原地写进卡里")
+    print("    · 别的音乐文件夹路径    —— 输出仍然去上面那个输出目录")
+    print()
+    print("  ⚠ 播放器只扫 SD 卡的【根目录】，不支持子文件夹。")
+    print("    所以 mp3 要放在同一个文件夹里，不要分很多层。")
     print()
 
     try:
-        raw = input("  请输入 SD 卡盘符（只输字母，直接回车退出）: ")
+        raw = input("  请输入（直接回车 = 用默认设置）: ")
     except (EOFError, KeyboardInterrupt):
         print()
         return None
 
-    raw = raw.strip().rstrip(":\\/").strip()
-    return raw or None
+    raw = raw.strip().strip('"').strip()
+
+    # 直接回车 -> 用默认的一读一写
+    if not raw:
+        return ("default", None)
+
+    # 只输了一个字母 -> 当成盘符
+    if re.fullmatch(r"[A-Za-z]", raw.rstrip(":\\/")):
+        return ("drive", raw.rstrip(":\\/").upper())
+
+    return ("dir", raw)
 
 
 def normalize_dir(value):
@@ -350,32 +392,57 @@ def normalize_dir(value):
 def main():
     parser = argparse.ArgumentParser(
         description="生成 SD 卡上播放器需要的字库和封面文件")
-    parser.add_argument("--music", default=".", help="音乐目录（默认当前目录）")
-    parser.add_argument("--out", default="./sd_ready", help="输出目录")
+    parser.add_argument("--music", default=None,
+                        help=f"音乐目录（默认 {DEFAULT_MUSIC_DIR}）")
+    parser.add_argument("--out", default=None,
+                        help=f"输出目录（默认 {DEFAULT_OUT_DIR}）")
     parser.add_argument("--size", type=int, default=140,
                         help="封面边长，要和固件的 COVER_W 一致（默认 140）")
     parser.add_argument("--no-font", action="store_true", help="跳过字库")
     parser.add_argument("--no-cover", action="store_true", help="跳过封面")
     parser.add_argument("-i", "--interactive", action="store_true",
-                        help="交互式：问你要 SD 卡盘符（给双击运行的 .cmd 用）")
+                        help="交互式提问（给双击运行的 .cmd 用，回车=用默认设置）")
     args = parser.parse_args()
 
     if args.interactive:
-        drive = ask_for_sd_drive()
-        if not drive:
+        target = ask_for_target()
+        if not target:
             print("  已取消。")
             return 1
-        target = f"{drive}:/"
-        if not Path(target).exists():
-            print()
-            print(f"  找不到 {drive}: 盘。检查一下：")
-            print("    1) 盘符字母对不对（打开「此电脑」看那张卡的字母）")
-            print("    2) 卡有没有插好、读卡器有没有被识别")
-            return 1
-        args.music = target
-        args.out = target
-        print(f"  目标盘：{drive}:\\")
-        print()
+
+        kind, value = target
+
+        if kind == "default":
+            args.music = str(DEFAULT_MUSIC_DIR)
+            args.out = str(DEFAULT_OUT_DIR)
+            print(f"\n  歌曲目录：{args.music}")
+            print(f"  输出目录：{args.out}\n")
+        elif kind == "drive":
+            if not Path(f"{value}:/").exists():
+                print()
+                print(f"  找不到 {value}: 盘。检查一下：")
+                print("    1) 盘符字母对不对（打开「此电脑」看那张卡的字母）")
+                print("    2) 卡有没有插好、读卡器有没有被识别")
+                return 1
+            args.music = f"{value}:/"
+            args.out = f"{value}:/"
+            print(f"\n  歌曲目录：{value}:\\  （SD 卡）")
+            print(f"  输出目录：{value}:\\  （原地读写）\n")
+        else:
+            if not Path(value).is_dir():
+                print()
+                print(f"  找不到这个文件夹：{value}")
+                print("  检查一下路径有没有打错。")
+                return 1
+            args.music = value
+            args.out = str(DEFAULT_OUT_DIR)
+            print(f"\n  歌曲目录：{value}")
+            print(f"  输出目录：{DEFAULT_OUT_DIR}\n")
+
+    if args.music is None:
+        args.music = str(DEFAULT_MUSIC_DIR)
+    if args.out is None:
+        args.out = str(DEFAULT_OUT_DIR)
 
     try:
         music_dir = normalize_dir(args.music)
@@ -408,11 +475,29 @@ def main():
 
     log()
     log("=" * 64)
-    if music_dir == out_dir:
+
+    if music_dir == out_dir and out_dir.parent == out_dir:
+        # 写进盘根 = 直接写在 SD 卡上
         log("完成！文件已经直接写进 SD 卡了。")
         log("把卡拔下来插回播放器，重新上电即可。")
+    elif music_dir == out_dir:
+        # 电脑上的文件夹：mp3 和封面在一起，整套拷过去
+        log(f"完成！现在把 {out_dir} 里的东西【全部】拷到 SD 卡根目录：")
+        log("    · 你的 .mp3")
+        log("    · font16.bin")
+        log("    · 所有的 .cov")
+        log()
+        log("注意：全都放在 SD 卡根目录，不要建子文件夹。")
     else:
-        log(f"把 {out_dir} 里的所有文件拷到 SD 卡根目录，然后重新上电即可。")
+        log("完成！现在把这两边的东西都拷到 SD 卡根目录：")
+        log()
+        log(f"  封面 + 字库：{out_dir}")
+        log(f"                 （这个目录里的全部文件）")
+        log(f"  歌曲：      {music_dir}")
+        log(f"                 （只要 .mp3）")
+        log()
+        log("注意：全部平铺在 SD 卡根目录，不要建子文件夹。")
+
     log("=" * 64)
     return 0
 
