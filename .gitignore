@@ -1,0 +1,13 @@
+# 忽略 Arduino / 编译产物
+build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# 忽略 Python 缓存
+__pycache__/
+*.pyc
+
+# 学习笔记暂不上传。想一起传就把下面这行删掉。
+docs/
