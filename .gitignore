@@ -14,3 +14,8 @@ sd_ready/
 
 # 学习笔记暂不上传。想一起传就把下面这行删掉。
 docs/
+
+# 流水线记账本 / 临时文件（本地状态，不进仓库）
+.pipeline_state.json
+.pipeline_state.json.tmp
+*.cov.tmp

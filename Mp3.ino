@@ -1,22 +1,22 @@
 /*
  * ============================================================================
- *  MP3 播放器 —— v2.2 + v2.4 中/日文歌名 + 封面
+ *  MP3 播放器 —— v2.5 播放模式 + 设置菜单
  * ============================================================================
  *
  *  硬件：ESP32-S3-DevKitC-1 + ST7789(240x240) + TF卡(SPI) + MAX98357A(I2S) + 3按键
  *  库  ：ESP8266Audio / Adafruit_ST7789 / Adafruit_GFX / SD(ESP32核心自带)
  *
  *  ── 上手前先做一件事 ──────────────────────────────────────────────────────
- *   在 PC 上跑一次  python prepare_sd.py --music <音乐目录> --out <输出目录>
- *   把输出目录里的东西（font16.bin + 一堆 .cov）拷到 SD 卡根目录，再上电。
- *   不跑也能用：会退回 flash 里的 60 字小字库，只是歌名没中文、封面是空相框。
+ *   在 PC 上跑一次  python prepare_sd.py   （默认读 D:\software\Music，
+ *   输出到 E:\Study\codes\Mp3\sd_ready），把产物拷到 SD 卡根目录，再上电。
+ *   不跑也能用：会退回 flash 里的小字库，只是歌名没中文、封面是空相框。
  *
- *  ── 三个页面 ──────────────────────────────────────────────────────────────
+ *  ── 五个页面 ──────────────────────────────────────────────────────────────
  *
  *   【页面1 播放详情】
  *       B1 短按 -> 播放 / 暂停
  *       B2 短按 -> 上一首          B2 长按 -> 进入【页面2 歌曲列表】
- *       B3 短按 -> 下一首          B3 长按 -> 进入【页面3 设置】
+ *       B3 短按 -> 下一首          B3 长按 -> 进入【页面3 设置菜单】
  *
  *   【页面2 歌曲列表】
  *       B2 短按 -> 光标上移        B3 短按 -> 光标下移（到顶/到底循环）
@@ -24,9 +24,19 @@
  *       B2/B3 长按 -> 放弃选择，直接回到页面1
  *       注意：移动光标【不会】切歌，正在播的那首用暗绿底标出
  *
- *   【页面3 设置】
+ *   【页面3 设置菜单】两个入口，右边直接显示当前值
+ *       B2 短按 -> 光标上移        B3 短按 -> 光标下移
+ *       B1 短按 -> 进入选中的那一项
+ *       B2/B3 长按 -> 回到页面1
+ *
+ *   【页面4 音量设置】
  *       B2 -> 音量 +（长按连调）   B3 -> 音量 -（长按连调）
- *       B1 短按 -> 回到页面1
+ *       B1 短按 -> 回设置菜单
+ *
+ *   【页面5 播放模式】光标（蓝底）和"当前生效"（绿点）是分开的
+ *       B2 短按 -> 光标上移        B3 短按 -> 光标下移
+ *       B1 短按 -> 确认生效并回设置菜单
+ *       B2/B3 长按 -> 放弃改动，回设置菜单
  *
  *  ── v2.2 中/日文歌名 ──────────────────────────────────────────────────────
  *   字库放 SD 卡（font16.bin，约 680KB），开机【一次性读进 PSRAM】。
@@ -41,22 +51,41 @@
  *   这样固件里不用塞图片解码器，也不会因为解码把音频卡爆。
  *   来源优先级：MP3 内嵌 ID3 封面 -> 同名 .jpg/.png/.bmp -> 没有就画空相框。
  *
+ *  ── v2.5 播放模式 ─────────────────────────────────────────────────────────
+ *   四种，存在 NVS 里掉电不丢，播放页状态行中间有个两字标记（顺序/循环/单曲/随机）：
+ *
+ *     顺序播放  放到最后一首就停，显示"完成"
+ *     列表循环  最后一首放完回到第一首
+ *     单曲循环  一直重复当前这首
+ *     随机播放  随机跳到另一首（不会随机到自己）
+ *
+ *   【重要边界】只有【自动续播】遵守模式；手动按上一首/下一首永远循环，
+ *   不管当前是什么模式 —— 不然顺序播放时按"下一首"会没反应，很难用。
+ *
+ *  ── v2.3 消除闪烁 ─────────────────────────────────────────────────────────
+ *   页内更新（切歌 / 移光标 / 调音量）不再整屏 fillScreen，只重画变化的部分。
+ *   整屏刷黑要发 115KB、约 58ms，那 58ms 的纯黑就是原来"闪一下"的来源。
+ *   只有【换页】时才 fillScreen —— 布局完全不同，必须清。
+ *
  *  ── 已实现 / 未实现 ────────────────────────────────────────────────────────
  *   ✔ 按钮事件抽象（短按 / 长按 / 长按连发）
- *   ✔ 三页面状态机；列表页光标与"正在播放的曲目"分离
+ *   ✔ 五页面状态机；列表页光标与"正在播放的曲目"分离
+ *   ✔ 播放模式（顺序/列表循环/单曲循环/随机）+ 自动续播，存 NVS
  *   ✔ 真·暂停（暂停期间持续往 I2S 灌静音，避免 DMA 重放最后一个缓冲）
  *   ✔ 音量存 NVS（停手 800ms 才落盘，省闪存寿命）
  *   ✔ 中/日文歌名（SD 全字库 -> PSRAM）+ 缺字豆腐块
  *   ✔ 封面图（PC 预处理 + 一次 blit）
+ *   ✔ 局部重绘，切歌 / 移光标不再闪黑
  *   ✔ 歌名跑马灯画在整屏宽度的独立横条里（屏幕边界天然就是裁剪边界）
  *   ✔ 列表页歌名按 UTF-8 字符边界截断 + "…"，不会切出半个汉字
  *   ✔ 重绘过程穿插 serviceAudio()，避免 UI 阻塞导致音频 underrun
- *   ✔ 文件名 hex dump（v2.0 诊断，已确认编码为 UTF-8）
  *
  *   ✘ 真实进度条 / 时长解析（原来的进度是假的，已移除）
- *   ✘ 列表超过 MAX_TRACKS 首 / 子目录 / 排序 —— v2.5
+ *   ✘ 列表超过 MAX_TRACKS 首 / 子目录 / 排序
  *   ✘ 大字号排版 —— 现在全局只有 16px 一种字号，层级只能靠留白做
  *
+ *  ⚠️ 【已知边界】如果一个 mp3 能打开但立刻播完（文件损坏），列表循环模式下
+ *     会快速连跳到下一首。正常文件不会触发。
  *  ⚠️ 【已知取舍】"长按2进列表 / 长按3进设置" 是隐藏手势，界面上没有常驻提示
  * ============================================================================
  */
@@ -123,7 +152,7 @@ const unsigned long CLOCK_DRAW_INTERVAL_MS = 1000;
 // 容量与音量
 // ============================================================================
 
-const int MAX_TRACKS = 64;
+const int MAX_TRACKS = 500;
 const int LIST_ROWS = 6;
 
 const int VOLUME_STEP = 5;
@@ -155,10 +184,19 @@ const int LIST_ROW_X = 6, LIST_ROW_W = 222, LIST_ROW_H = 24;
 const int LIST_FIRST_Y = 26, LIST_ROW_GAP = 25;
 const int LIST_SCROLLBAR_X = 234, LIST_TRACK_Y = 26, LIST_TRACK_H = 173;
 
-// 页面3 设置
+// 页面3 设置菜单（两个入口）
+const int MENU_ITEM_X = 16, MENU_ITEM_W = 208, MENU_ITEM_H = 48;
+const int MENU_FIRST_Y = 56, MENU_ITEM_GAP = 62;
+const int MENU_ITEM_COUNT = 2;
+
+// 页面4 音量设置
 const int SET_LABEL_Y = 60;
 const int SET_BAR_X = 20, SET_BAR_Y = 92, SET_BAR_W = 200, SET_BAR_H = 34;
 const int SET_TRACK_Y = 158;
+
+// 页面5 播放模式
+const int MODE_ITEM_X = 16, MODE_ITEM_W = 208, MODE_ITEM_H = 36;
+const int MODE_FIRST_Y = 24, MODE_ITEM_GAP = 44;
 
 // 底部按键提示（只有一行：三个按钮的短按功能）
 const int FOOTER_CLEAR_Y = 200;  // 从这里往下整块清掉重画
@@ -209,12 +247,41 @@ int currentTrackIndex = 0;   // 正在播放 / 已选中的曲目
 
 // ---- 页面 ----
 enum UiPage {
-  PAGE_PLAYER,
-  PAGE_LIST,
-  PAGE_SETTINGS
+  PAGE_PLAYER,     // 播放详情
+  PAGE_LIST,       // 歌曲列表
+  PAGE_SETTINGS,   // 设置菜单（音量设置 / 播放设置 两个入口）
+  PAGE_VOLUME,     // 音量设置
+  PAGE_PLAY_MODE   // 播放模式设置（顺序/列表循环/单曲循环/随机）
 };
 
 UiPage currentPage = PAGE_PLAYER;
+
+// changeTrack() 期间置 true，用来掐掉状态行的第一遍重画（见那里注释）。
+// 默认 false —— 平时状态一变就应该立刻刷新状态行。
+bool deferStatusRedraw = false;
+
+// serviceAudio() 发现一首放完了就置这个标记，真正的处理交给 loop()。
+// 原因：serviceAudio() 可能是在 drawUtf8Text() 内部被调用的，
+// 在那里直接切歌会嵌套触发一次整页绘制。
+bool trackFinishedPending = false;
+
+// ============================================================================
+// 播放模式
+// ============================================================================
+
+enum PlayMode {
+  MODE_SEQUENTIAL = 0,  // 顺序播放：放到最后一首就停
+  MODE_REPEAT_ALL,      // 列表循环：最后一首放完回到第一首
+  MODE_REPEAT_ONE,      // 单曲循环：一直重复当前这首
+  MODE_SHUFFLE,         // 随机播放
+  PLAY_MODE_COUNT
+};
+
+int playMode = MODE_SEQUENTIAL;
+
+// 两个设置页各自的光标
+int settingsCursor = 0;  // 设置菜单：0 = 音量设置，1 = 播放设置
+int modeCursor = 0;      // 播放模式页：确认之前的临时选择
 
 int listCursor = 0;   // 列表页光标（独立于 currentTrackIndex）
 int listTop = 0;      // 列表可视区第一行
@@ -271,6 +338,8 @@ void stopPlayback();
 void updatePlaybackStatus(const String &status);
 void drawCurrentPage();
 void drawPlayerStatusBar();
+void handleTrackFinished();
+const char *playModeName(int mode);
 
 // ============================================================================
 // SD 卡全字库（中/日文歌名靠它）
@@ -814,6 +883,7 @@ void applyVolume() {
 void loadSettings() {
   prefs.begin("mp3ui", false);
   volume = prefs.getInt("vol", DEFAULT_VOLUME);
+  playMode = prefs.getInt("mode", MODE_SEQUENTIAL);
 
   if (volume < 0) {
     volume = 0;
@@ -821,12 +891,23 @@ void loadSettings() {
     volume = 100;
   }
 
+  if (playMode < 0 || playMode >= PLAY_MODE_COUNT) {
+    playMode = MODE_SEQUENTIAL;
+  }
+
   Serial.print("Volume from NVS: ");
   Serial.println(volume);
+  Serial.print("Play mode from NVS: ");
+  Serial.println(playModeName(playMode));
 }
 
 void saveSettings() {
   prefs.putInt("vol", volume);
+}
+
+// 播放模式是一次性确认（不是长按连调），所以确认时立即落盘
+void savePlayMode() {
+  prefs.putInt("mode", playMode);
 }
 
 // ============================================================================
@@ -895,14 +976,18 @@ void serviceAudio() {
   if (isPlaying && isPaused) {
     feedSilence();
   } else if (isPlaying) {
+    bool finished = false;
+
     if (mp3 && mp3->isRunning()) {
-      if (!mp3->loop()) {
-        stopPlayback();
-        updatePlaybackStatus("DONE");
-      }
+      finished = !mp3->loop();
     } else {
+      finished = true;
+    }
+
+    if (finished) {
       stopPlayback();
-      updatePlaybackStatus("DONE");
+      // 只记标记，真正的处理放到 loop() 里（见 trackFinishedPending 的声明处）
+      trackFinishedPending = true;
     }
   }
 
@@ -1056,11 +1141,41 @@ const char *statusText(const String &status) {
 
 // 状态一变就调这里：写串口日志 + 刷新播放页顶部状态行。
 // 注意它【不再】画一大条彩色横幅 —— 状态现在只用一个小圆点的颜色表达。
+// 模式全名 —— 设置菜单和播放模式页用
+const char *playModeName(int mode) {
+  switch (mode) {
+    case MODE_REPEAT_ALL:
+      return "列表循环";
+    case MODE_REPEAT_ONE:
+      return "单曲循环";
+    case MODE_SHUFFLE:
+      return "随机播放";
+    case MODE_SEQUENTIAL:
+    default:
+      return "顺序播放";
+  }
+}
+
+// 模式简写 —— 播放页状态行里那一小块用（只占两个字宽）
+const char *playModeBadge(int mode) {
+  switch (mode) {
+    case MODE_REPEAT_ALL:
+      return "循环";
+    case MODE_REPEAT_ONE:
+      return "单曲";
+    case MODE_SHUFFLE:
+      return "随机";
+    case MODE_SEQUENTIAL:
+    default:
+      return "顺序";
+  }
+}
+
 void updatePlaybackStatus(const String &status) {
   Serial.print("[status] ");
   Serial.println(statusText(status));
 
-  if (currentPage == PAGE_PLAYER) {
+  if (currentPage == PAGE_PLAYER && !deferStatusRedraw) {
     drawPlayerStatusBar();
   }
 }
@@ -1171,19 +1286,34 @@ void drawPlayerStatusBar() {
                  ST77XX_BLACK);
   }
 
+  // 当前播放模式（顺序/循环/单曲/随机），暗色，不抢注意力
+  drawUtf8TextCentered(playModeBadge(playMode), 155, STATUS_Y, COLOR_DIM_TEXT,
+                       ST77XX_BLACK);
+
   drawUtf8TextRight(formatElapsed(elapsedMs()).c_str(), 230, STATUS_Y,
                     ST77XX_WHITE);
 }
 
-// 每秒只刷右边那一小块时间，不重画整条状态行
+// 每秒只刷右边那一小块时间，不重画整条状态行。
+// 清屏区必须从 180 开始 —— 再往左会把上面那个模式标记（约 139~171）擦掉。
 void drawPlayerStatusClock() {
-  tft.fillRect(140, 0, 100, 22, ST77XX_BLACK);
+  tft.fillRect(180, 0, 60, 22, ST77XX_BLACK);
   drawUtf8TextRight(formatElapsed(elapsedMs()).c_str(), 230, STATUS_Y,
                     ST77XX_WHITE);
 }
 
-void drawPlayerPage() {
-  tft.fillScreen(ST77XX_BLACK);
+// fullClear=true 才会整屏刷黑。
+//
+// 切歌时传 false：状态行、封面、歌名条这三个组件本来就各给自己铺底，
+// 页脚和四周背景也没变，所以完全不需要再花 58ms 把整屏刷黑一遍 ——
+// 那 58ms 的纯黑，就是"切歌闪一下"的来源。
+//
+// 从别的页面切进来（布局完全不同）时必须传 true，否则会留下上个页面的残影。
+void drawPlayerPage(bool fullClear) {
+  if (fullClear) {
+    tft.fillScreen(ST77XX_BLACK);
+  }
+
   drawPlayerStatusBar();
   drawAlbumArt();
   drawTrackTitle();
@@ -1195,6 +1325,10 @@ void drawPlayerPage() {
 // ============================================================================
 
 void drawListScrollbar() {
+  // 先整列擦掉。列表页现在页内更新不整屏清空了，
+  // 滑块换位置时必须自己把旧位置抹掉，否则会拖一条青色尾巴下来。
+  tft.fillRect(LIST_SCROLLBAR_X, LIST_TRACK_Y, 4, LIST_TRACK_H, ST77XX_BLACK);
+
   if (trackCount <= LIST_ROWS) {
     return;
   }
@@ -1238,8 +1372,11 @@ void drawListRow(int row, int trackIndex) {
   drawUtf8Text(name.c_str(), LIST_ROW_X + 44, y + 3, ST77XX_WHITE, background);
 }
 
-void drawListPage() {
-  tft.fillScreen(ST77XX_BLACK);
+// fullClear=true 只在【换页进来】时用。页内移动光标走 refreshListCursor()。
+void drawListPage(bool fullClear) {
+  if (fullClear) {
+    tft.fillScreen(ST77XX_BLACK);
+  }
 
   String position = String(listCursor + 1) + "/" + String(trackCount);
   drawTopLabel("歌曲列表", position.c_str(), ST77XX_YELLOW);
@@ -1261,6 +1398,24 @@ void drawListPage() {
   // 按钮上写"上一首/下一首"是跟着硬件来的（GPIO15/16 的丝印就是上一曲/下一曲），
   // 在列表页它们移动光标，差别由中间的"选择"来交代
   drawFooterKeys("上一首", "选择", "下一首");
+}
+
+// 光标只挪了一格、视野没翻页时用这个：只重画【旧光标行 + 新光标行】+ 顶栏的 n/N。
+//
+// 这是列表页体验的关键：原来每次按上下键都要 fillScreen + 重画 7 行（约 110ms，
+// 其中 58ms 是黑屏）；现在只碰两行（约 11ms），而且完全不黑屏。
+void refreshListCursor(int previousCursor) {
+  String position = String(listCursor + 1) + "/" + String(trackCount);
+  drawTopLabel("歌曲列表", position.c_str(), ST77XX_YELLOW);
+
+  // 先画旧那行（此时 listCursor 已经变了，它会自动按"非光标"的样式重画）
+  if (previousCursor >= listTop && previousCursor < listTop + LIST_ROWS) {
+    drawListRow(previousCursor - listTop, previousCursor);
+  }
+  // 再画新那行，让它拿到高亮
+  if (listCursor >= listTop && listCursor < listTop + LIST_ROWS) {
+    drawListRow(listCursor - listTop, listCursor);
+  }
 }
 
 void ensureListCursorVisible() {
@@ -1297,27 +1452,120 @@ void moveListCursor(int step) {
   ensureListCursorVisible();
 }
 
-// ============================================================================
-// 页面3：设置
-// ============================================================================
+// 移动光标 + 只重画该重画的部分。
+//   没翻页  -> 只刷旧行和新行（约 11ms）
+//   翻页了  -> 重画 7 行（约 38ms），但依然【不整屏刷黑】
+// 对比原来的 fillScreen + 整页重画（约 110ms，其中 58ms 黑屏）
+void stepListCursor(int step) {
+  int previousCursor = listCursor;
+  int previousTop = listTop;
 
-void drawSettingsPage() {
-  tft.fillScreen(ST77XX_BLACK);
+  moveListCursor(step);
 
-  // SD 状态从播放页搬到这里 —— 它是诊断信息，属于设置页，不该占播放页的版面
+  if (listTop == previousTop) {
+    refreshListCursor(previousCursor);
+  } else {
+    drawListPage(false);
+  }
+}
+
+// ============================================================================
+// 页面3：设置菜单
+// ============================================================================
+//
+// 进入设置先看到这个菜单，再从两个入口进各自的子页。
+// 右边直接显示"当前值"，不进去也知道现在是多少。
+
+const char *menuItemLabel(int index) {
+  return index == 0 ? "音量设置" : "播放设置";
+}
+
+// 右边那个当前值：音量显示数字，播放设置显示模式名
+String menuItemValue(int index) {
+  if (index == 0) {
+    return String(volume);
+  }
+  return String(playModeName(playMode));
+}
+
+void drawMenuItem(int index, bool selected) {
+  int y = MENU_FIRST_Y + index * MENU_ITEM_GAP;
+  uint16_t background = selected ? ST77XX_BLUE : 0x1082;
+  uint16_t labelColor = selected ? ST77XX_WHITE : COLOR_DIM_TEXT;
+
+  tft.fillRect(MENU_ITEM_X, y, MENU_ITEM_W, MENU_ITEM_H, background);
+
+  if (selected) {
+    tft.drawRect(MENU_ITEM_X, y, MENU_ITEM_W, MENU_ITEM_H, ST77XX_WHITE);
+  }
+
+  drawUtf8Text(menuItemLabel(index), MENU_ITEM_X + 16, y + 16, labelColor,
+               background);
+  drawUtf8TextRight(menuItemValue(index).c_str(),
+                    MENU_ITEM_X + MENU_ITEM_W - 16, y + 16, labelColor);
+}
+
+void drawSettingsPage(bool fullClear) {
+  if (fullClear) {
+    tft.fillScreen(ST77XX_BLACK);
+  }
+
+  // SD 状态放在这里 —— 它是诊断信息，不该占播放页的版面
   drawTopLabel("设置", sdOk ? "SD OK" : "SD FAIL",
                sdOk ? ST77XX_GREEN : ST77XX_RED);
 
-  drawUtf8Text("音量", SET_BAR_X, SET_LABEL_Y, ST77XX_CYAN, ST77XX_BLACK);
+  for (int i = 0; i < MENU_ITEM_COUNT; i++) {
+    drawMenuItem(i, i == settingsCursor);
+    serviceAudio();
+  }
+
+  drawFooterKeys("上一首", "选择", "下一首");
+}
+
+// 光标只挪一格：只重画【旧项 + 新项】两行，不清屏
+void refreshSettingsCursor(int previousCursor) {
+  if (previousCursor >= 0 && previousCursor < MENU_ITEM_COUNT) {
+    drawMenuItem(previousCursor, previousCursor == settingsCursor);
+  }
+  drawMenuItem(settingsCursor, true);
+}
+
+// ============================================================================
+// 页面4：音量设置
+// ============================================================================
+
+// 只重画"数值 + 进度条"这两块。调音量时用这个，不要整页重画。
+//
+// 两处必须先擦后画，否则不清屏时会留残影：
+//   1) 数值从 100 变 50 时，右边少一位，旧的高位会留在原处
+//   2) 进度条变短时，右边多余的青色会留下
+void refreshVolumeDisplay() {
+  tft.fillRect(SET_BAR_X + SET_BAR_W - 48, SET_LABEL_Y, 48, 18, ST77XX_BLACK);
   drawUtf8TextRight(String(volume).c_str(), SET_BAR_X + SET_BAR_W, SET_LABEL_Y,
                     ST77XX_WHITE);
 
-  tft.drawRect(SET_BAR_X, SET_BAR_Y, SET_BAR_W, SET_BAR_H, COLOR_BOX_LINE);
-  int fillWidth = (SET_BAR_W - 4) * volume / 100;
+  int innerWidth = SET_BAR_W - 4;
+  int innerHeight = SET_BAR_H - 4;
+  tft.fillRect(SET_BAR_X + 2, SET_BAR_Y + 2, innerWidth, innerHeight,
+               ST77XX_BLACK);
+
+  int fillWidth = innerWidth * volume / 100;
   if (fillWidth > 0) {
-    tft.fillRect(SET_BAR_X + 2, SET_BAR_Y + 2, fillWidth, SET_BAR_H - 4,
+    tft.fillRect(SET_BAR_X + 2, SET_BAR_Y + 2, fillWidth, innerHeight,
                  ST77XX_CYAN);
   }
+}
+
+void drawVolumePage(bool fullClear) {
+  if (fullClear) {
+    tft.fillScreen(ST77XX_BLACK);
+  }
+
+  drawTopLabel("音量设置", "", ST77XX_WHITE);
+
+  drawUtf8Text("音量", SET_BAR_X, SET_LABEL_Y, ST77XX_CYAN, ST77XX_BLACK);
+  tft.drawRect(SET_BAR_X, SET_BAR_Y, SET_BAR_W, SET_BAR_H, COLOR_BOX_LINE);
+  refreshVolumeDisplay();
 
   String title = trackName(currentTrackPath());
   if (title.length() == 0) {
@@ -1331,20 +1579,79 @@ void drawSettingsPage() {
 }
 
 // ============================================================================
+// 页面5：播放模式
+// ============================================================================
+//
+// 光标（蓝底）和"当前生效的模式"（右边一个绿点）是分开的两件事：
+// 移动光标只是"我在选什么"，按 B1 确认之后才会真的生效。
+
+void drawModeItem(int index, bool selected) {
+  int y = MODE_FIRST_Y + index * MODE_ITEM_GAP;
+  bool active = (index == playMode);
+
+  uint16_t background = selected ? ST77XX_BLUE : 0x1082;
+  uint16_t labelColor = selected ? ST77XX_WHITE : COLOR_DIM_TEXT;
+
+  tft.fillRect(MODE_ITEM_X, y, MODE_ITEM_W, MODE_ITEM_H, background);
+
+  if (selected) {
+    tft.drawRect(MODE_ITEM_X, y, MODE_ITEM_W, MODE_ITEM_H, ST77XX_WHITE);
+  }
+
+  drawUtf8Text(playModeName(index), MODE_ITEM_X + 16, y + 10, labelColor,
+               background);
+
+  // 绿点 = 现在真正生效的模式
+  if (active) {
+    drawUtf8Text("●", MODE_ITEM_X + MODE_ITEM_W - 30, y + 10, ST77XX_GREEN,
+                 background);
+  }
+}
+
+void drawPlayModePage(bool fullClear) {
+  if (fullClear) {
+    tft.fillScreen(ST77XX_BLACK);
+  }
+
+  drawTopLabel("播放设置", "", ST77XX_WHITE);
+
+  for (int i = 0; i < PLAY_MODE_COUNT; i++) {
+    drawModeItem(i, i == modeCursor);
+    serviceAudio();
+  }
+
+  drawFooterKeys("返回", "上一个", "下一个");
+}
+
+// 光标只挪一格：只重画【旧项 + 新项】两行，不清屏
+void refreshModeCursor(int previousCursor) {
+  if (previousCursor >= 0 && previousCursor < PLAY_MODE_COUNT) {
+    drawModeItem(previousCursor, previousCursor == modeCursor);
+  }
+  drawModeItem(modeCursor, true);
+}
+
+// ============================================================================
 // 页面调度
 // ============================================================================
 
 void drawCurrentPage() {
   switch (currentPage) {
     case PAGE_LIST:
-      drawListPage();
+      drawListPage(true);
       break;
     case PAGE_SETTINGS:
-      drawSettingsPage();
+      drawSettingsPage(true);
+      break;
+    case PAGE_VOLUME:
+      drawVolumePage(true);
+      break;
+    case PAGE_PLAY_MODE:
+      drawPlayModePage(true);
       break;
     case PAGE_PLAYER:
     default:
-      drawPlayerPage();
+      drawPlayerPage(true);
       break;
   }
 }
@@ -1435,10 +1742,97 @@ void changeTrack(int step) {
 
   if (currentPage == PAGE_PLAYER) {
     resetTitleScroll();
-    drawPlayerPage();
+
+    // 顺序很重要：先起播（只改状态、不画），最后整页画一次。
+    // 原来先 drawPlayerPage() 再 startPlayback()，状态行会被画两遍 —— 那 22px
+    // 小条会在切歌时闪一下。deferStatusRedraw 就是用来掐掉第一遍的。
+    deferStatusRedraw = true;
     if (wasPlaying) {
       startPlayback();
     }
+    deferStatusRedraw = false;
+
+    // 传 false：不整屏刷黑，只重画状态行/封面/歌名条（页脚没变）
+    drawPlayerPage(false);
+  }
+}
+
+// 随机挑一首，不会挑到正在放的这首
+void pickRandomTrack() {
+  if (trackCount <= 1) {
+    return;
+  }
+
+  int next = currentTrackIndex;
+  while (next == currentTrackIndex) {
+    next = random(trackCount);
+  }
+
+  currentTrackIndex = next;
+}
+
+// 列表页里"正在播放"那一行的底色变了，重画受影响的两行
+void refreshNowPlayingRows(int previousTrack) {
+  if (previousTrack >= listTop && previousTrack < listTop + LIST_ROWS) {
+    drawListRow(previousTrack - listTop, previousTrack);
+  }
+  if (currentTrackIndex >= listTop && currentTrackIndex < listTop + LIST_ROWS) {
+    drawListRow(currentTrackIndex - listTop, currentTrackIndex);
+  }
+}
+
+// 一首放完了（由 loop() 在 serviceAudio() 之后调用）。
+// 按当前播放模式决定接下来怎么办：
+//
+//   顺序播放   往后走一首；已经是最后一首就停下，显示"完成"
+//   列表循环   往后走一首；最后一首之后回到第一首
+//   单曲循环   索引不动，原地重放
+//   随机播放   随机跳到另一首
+//
+// 注意：这里是【自动续播】，遵守模式；手动按上一首/下一首永远循环，不遵守模式。
+void handleTrackFinished() {
+  int previousTrack = currentTrackIndex;
+
+  if (trackCount == 0) {
+    updatePlaybackStatus("DONE");
+    return;
+  }
+
+  if (playMode == MODE_REPEAT_ONE) {
+    // 单曲循环：索引不动
+  } else if (playMode == MODE_SEQUENTIAL &&
+             currentTrackIndex + 1 >= trackCount) {
+    // 顺序播放走到头了：停
+    Serial.println("Playlist finished (sequential mode).");
+    updatePlaybackStatus("DONE");
+
+    if (currentPage == PAGE_LIST) {
+      refreshNowPlayingRows(previousTrack);
+    }
+    return;
+  } else if (playMode == MODE_SHUFFLE) {
+    pickRandomTrack();
+  } else {
+    // 列表循环，或顺序播放的中间某一首
+    currentTrackIndex = (currentTrackIndex + 1) % trackCount;
+  }
+
+  Serial.print("Auto next: ");
+  Serial.println(currentTrackPath());
+
+  if (currentPage == PAGE_PLAYER) {
+    resetTitleScroll();
+  }
+
+  // 先起播（只改状态、不画），最后再刷新界面 —— 避免状态行被画两遍
+  deferStatusRedraw = true;
+  startPlayback();
+  deferStatusRedraw = false;
+
+  if (currentPage == PAGE_PLAYER) {
+    drawPlayerPage(false);
+  } else if (currentPage == PAGE_LIST) {
+    refreshNowPlayingRows(previousTrack);
   }
 }
 
@@ -1446,18 +1840,37 @@ void enterListPage() {
   currentPage = PAGE_LIST;
   listCursor = currentTrackIndex;
   ensureListCursorVisible();
-  drawListPage();
+  drawListPage(true);
 }
 
+// 长按 B3 进设置 —— 先进菜单，不再直接进音量页
 void enterSettingsPage() {
   currentPage = PAGE_SETTINGS;
-  drawSettingsPage();
+  settingsCursor = 0;
+  drawSettingsPage(true);
+}
+
+void enterVolumePage() {
+  currentPage = PAGE_VOLUME;
+  drawVolumePage(true);
+}
+
+void enterPlayModePage() {
+  currentPage = PAGE_PLAY_MODE;
+  modeCursor = playMode;  // 光标先停在当前生效的那一项
+  drawPlayModePage(true);
+}
+
+// 子页 -> 回设置菜单
+void backToSettingsMenu() {
+  currentPage = PAGE_SETTINGS;
+  drawSettingsPage(true);
 }
 
 void backToPlayerPage() {
   currentPage = PAGE_PLAYER;
   resetTitleScroll();
-  drawPlayerPage();
+  drawPlayerPage(true);
 }
 
 void adjustVolume(int delta) {
@@ -1476,7 +1889,9 @@ void adjustVolume(int delta) {
   applyVolume();
   volumeDirty = true;
   volumeChangedMs = millis();
-  drawSettingsPage();
+
+  // 只刷数值和进度条。整页重画会在长按连调时每秒闪 8 次黑屏。
+  refreshVolumeDisplay();
 
   Serial.print("Volume: ");
   Serial.println(volume);
@@ -1519,7 +1934,7 @@ void onListEvent(BtnId id, BtnEvent event) {
           currentTrackIndex = listCursor;
           resetTitleScroll();
           currentPage = PAGE_PLAYER;
-          drawPlayerPage();
+          drawPlayerPage(true);   // 换页了，布局完全不同，必须整屏清一次
           startPlayback();
         }
       }
@@ -1527,8 +1942,7 @@ void onListEvent(BtnId id, BtnEvent event) {
 
     case BTN_PREV:
       if (event == EV_CLICK) {
-        moveListCursor(-1);
-        drawListPage();
+        stepListCursor(-1);
       } else if (event == EV_LONG) {
         backToPlayerPage();
       }
@@ -1536,8 +1950,7 @@ void onListEvent(BtnId id, BtnEvent event) {
 
     case BTN_NEXT:
       if (event == EV_CLICK) {
-        moveListCursor(1);
-        drawListPage();
+        stepListCursor(1);
       } else if (event == EV_LONG) {
         backToPlayerPage();
       }
@@ -1548,11 +1961,50 @@ void onListEvent(BtnId id, BtnEvent event) {
   }
 }
 
-void onSettingsEvent(BtnId id, BtnEvent event) {
+// ---- 设置菜单：B2/B3 移光标，B1 进入选中的那一项 ----------------------------
+void onSettingsMenuEvent(BtnId id, BtnEvent event) {
   switch (id) {
     case BTN_PLAY:
       if (event == EV_CLICK) {
+        if (settingsCursor == 0) {
+          enterVolumePage();
+        } else {
+          enterPlayModePage();
+        }
+      }
+      break;
+
+    case BTN_PREV:
+      if (event == EV_CLICK) {
+        int previous = settingsCursor;
+        settingsCursor = (settingsCursor + MENU_ITEM_COUNT - 1) % MENU_ITEM_COUNT;
+        refreshSettingsCursor(previous);
+      } else if (event == EV_LONG) {
         backToPlayerPage();
+      }
+      break;
+
+    case BTN_NEXT:
+      if (event == EV_CLICK) {
+        int previous = settingsCursor;
+        settingsCursor = (settingsCursor + 1) % MENU_ITEM_COUNT;
+        refreshSettingsCursor(previous);
+      } else if (event == EV_LONG) {
+        backToPlayerPage();
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
+// ---- 音量页：B2/B3 调（长按连调），B1 回菜单 --------------------------------
+void onVolumeEvent(BtnId id, BtnEvent event) {
+  switch (id) {
+    case BTN_PLAY:
+      if (event == EV_CLICK) {
+        backToSettingsMenu();
       }
       break;
 
@@ -1577,6 +2029,44 @@ void onSettingsEvent(BtnId id, BtnEvent event) {
   }
 }
 
+// ---- 播放模式页：B2/B3 移光标，B1 确认生效并回菜单，长按 B2/B3 放弃返回 -----
+void onPlayModeEvent(BtnId id, BtnEvent event) {
+  switch (id) {
+    case BTN_PLAY:
+      if (event == EV_CLICK) {
+        playMode = modeCursor;
+        savePlayMode();
+        Serial.print("Play mode: ");
+        Serial.println(playModeName(playMode));
+        backToSettingsMenu();
+      }
+      break;
+
+    case BTN_PREV:
+      if (event == EV_CLICK) {
+        int previous = modeCursor;
+        modeCursor = (modeCursor + PLAY_MODE_COUNT - 1) % PLAY_MODE_COUNT;
+        refreshModeCursor(previous);
+      } else if (event == EV_LONG) {
+        backToSettingsMenu();  // 放弃这次改动
+      }
+      break;
+
+    case BTN_NEXT:
+      if (event == EV_CLICK) {
+        int previous = modeCursor;
+        modeCursor = (modeCursor + 1) % PLAY_MODE_COUNT;
+        refreshModeCursor(previous);
+      } else if (event == EV_LONG) {
+        backToSettingsMenu();
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
 void dispatchUiEvent(BtnId id, BtnEvent event) {
   if (event == EV_NONE) {
     return;
@@ -1587,7 +2077,13 @@ void dispatchUiEvent(BtnId id, BtnEvent event) {
       onListEvent(id, event);
       break;
     case PAGE_SETTINGS:
-      onSettingsEvent(id, event);
+      onSettingsMenuEvent(id, event);
+      break;
+    case PAGE_VOLUME:
+      onVolumeEvent(id, event);
+      break;
+    case PAGE_PLAY_MODE:
+      onPlayModeEvent(id, event);
       break;
     case PAGE_PLAYER:
     default:
@@ -1637,11 +2133,14 @@ void setup() {
   delay(1000);
 
   Serial.println();
-  Serial.println("=== MP3 player v2.1 (3 pages) ===");
+  Serial.println("=== MP3 player v2.5 (4 pages + play modes) ===");
   Serial.println("TFT CS=9, SD CS=10, SCK=12, MOSI=11, MISO=13");
   Serial.println("I2S BCLK=5, LRC=6, DIN=7");
   Serial.println("Buttons: GPIO4 play/pause, GPIO15 prev/list, GPIO16 next/settings");
   Serial.println();
+
+  // 随机播放要用，不播种的话每次上电的随机序列都一样
+  randomSeed(micros());
 
   if (TFT_BLK >= 0) {
     pinMode(TFT_BLK, OUTPUT);
@@ -1724,7 +2223,15 @@ void loop() {
   // 4) 喂音频
   serviceAudio();
 
-  // 5) 音量停手 800ms 之后才写 NVS
+  // 5) 曲终处理。必须放在 serviceAudio() 之后、并且【不】在绘制中途做 ——
+  //    serviceAudio() 可能是在 drawUtf8Text() 内部被调用的，
+  //    在那里直接切歌会嵌套触发一次整页绘制。
+  if (trackFinishedPending) {
+    trackFinishedPending = false;
+    handleTrackFinished();
+  }
+
+  // 6) 音量停手 800ms 之后才写 NVS
   if (volumeDirty && millis() - volumeChangedMs >= 800) {
     volumeDirty = false;
     saveSettings();

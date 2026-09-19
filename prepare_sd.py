@@ -25,9 +25,11 @@
 
 import argparse
 import io
+import json
 import re
 import struct
 import sys
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -86,10 +88,87 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp", ".gif")
 
 DEFAULT_MUSIC_DIR = Path(r"D:\software\Music")
 DEFAULT_OUT_DIR = Path(r"E:\Study\codes\Mp3\sd_ready")
+DEFAULT_STATE_FILE = Path(r"E:\Study\codes\Mp3\.pipeline_state.json")
+
+
+# ============================================================================
+# 增量支持
+# ============================================================================
+#
+# 清单文件由本脚本和 pipeline.py 共用，格式：
+#   { "version": 1,
+#     "items": { "<源文件绝对路径小写>": {
+#         "source_sig": {"mtime": 秒, "size": 字节},   源文件指纹
+#         "output":     "<产出文件路径>",
+#         "output_sig": {"mtime": 秒, "size": 字节} } },
+#     "font": {...} }
+#
+# 判定规则：源没变 且 产出还在（指纹也对得上）→ 跳过，不做重复工作。
+# 产出写完会把 mtime 设成和源一样，所以即使清单丢了，"文件本身"也能说明问题。
+
+STATE_VERSION = 1
 
 
 def log(msg=""):
     print(msg, flush=True)
+
+
+def stat_sig(path):
+    st = Path(path).stat()
+    return {"mtime": int(st.st_mtime), "size": st.st_size}
+
+
+def copy_mtime(src, dst):
+    import os
+    st = Path(src).stat()
+    os.utime(dst, (st.st_atime, st.st_mtime))
+
+
+class State:
+    def __init__(self, path, read_only=False):
+        self.path = Path(path) if path else None
+        self.read_only = read_only or self.path is None
+        self.data = {"version": STATE_VERSION, "items": {}, "font": None}
+        if self.path and self.path.exists():
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                if loaded.get("version") == STATE_VERSION:
+                    self.data = loaded
+                    self.data.setdefault("items", {})
+                else:
+                    log(f"  ⚠ 清单版本不认识，忽略旧清单")
+            except (OSError, json.JSONDecodeError) as exc:
+                log(f"  ⚠ 清单读不出来（{exc}），忽略旧清单")
+
+    def get(self, source_path):
+        return self.data["items"].get(str(source_path).lower())
+
+    def put(self, source_path, entry):
+        self.data["items"][str(source_path).lower()] = entry
+
+    def save(self):
+        if self.read_only:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(self.path)
+
+
+def font_fingerprint():
+    """字库的"输入指纹"：区段配置 + 两个字体文件本身。改任何一个都能察觉到。"""
+    parts = [f"{FONT_MAGIC!r}", GLYPH_W, GLYPH_H,
+             ";".join(f"{s:x}-{e:x}-{w}" for s, e, w in FONT_RANGES)]
+    for candidates in (HANZI_FONT_CANDIDATES, KANA_FONT_CANDIDATES):
+        for path in candidates:
+            if Path(path).exists():
+                parts.append(f"{path}:{stat_sig(path)['mtime']}:"
+                             f"{stat_sig(path)['size']}")
+                break
+        else:
+            parts.append("none")
+    return "|".join(str(p) for p in parts)
 
 
 # ============================================================================
@@ -120,7 +199,25 @@ def build_glyph(font, character):
     return image.tobytes()
 
 
-def generate_font(out_dir):
+def generate_font(out_dir, state=None, force=False, dry_run=False):
+    out_path = out_dir / FONT_FILE
+    fingerprint = font_fingerprint()
+
+    # 增量：字库配置和字体文件都没变、产出还在 → 跳过（这是最省时间的一步，
+    # 全量重算要遍历 21696 个字形）
+    if state is not None and not force:
+        recorded = state.data.get("font")
+        if (recorded and recorded.get("fingerprint") == fingerprint
+                and out_path.exists()
+                and stat_sig(out_path) == recorded.get("output_sig")):
+            log(f"  · 跳过（字体和区段都没变）  {out_path.name}  "
+                f"{out_path.stat().st_size / 1024:.0f} KB")
+            return out_path
+
+    if dry_run:
+        log(f"  + 需要重建  {out_path.name}")
+        return out_path
+
     hanzi_path = pick_font(HANZI_FONT_CANDIDATES, "汉字")
     kana_path = pick_font(KANA_FONT_CANDIDATES, "假名")
     log(f"  汉字字体: {hanzi_path}")
@@ -151,18 +248,25 @@ def generate_font(out_dir):
         log(f"    U+{start:04X}-U+{end:04X}  完成")
 
     out_path = out_dir / FONT_FILE
-    with open(out_path, "wb") as f:
+    tmp_path = out_path.with_suffix(".bin.tmp")
+    with open(tmp_path, "wb") as f:
         f.write(FONT_MAGIC)
         f.write(struct.pack("<HHHHI", GLYPH_W, GLYPH_H, BYTES_PER_GLYPH,
                             len(FONT_RANGES), 0))
         for start, end, offset in segment_headers:
             f.write(struct.pack("<III", start, end, offset))
         f.write(body)
+    tmp_path.replace(out_path)
 
     size_kb = out_path.stat().st_size / 1024
     log(f"  ✔ {out_path}  ({size_kb:.0f} KB)")
     if blank_count:
         log(f"  ⚠ 有 {blank_count} 个字形在该字体里是空白的（属正常，冷门码位）")
+
+    if state is not None:
+        state.data["font"] = {"fingerprint": fingerprint,
+                              "output_sig": stat_sig(out_path),
+                              "when": time.strftime("%Y-%m-%d %H:%M:%S")}
     return out_path
 
 
@@ -282,46 +386,130 @@ def report_where_the_songs_are(music_dir):
         log("     .ncm 是云音乐的加密格式，必须先转成 .mp3 播放器才认。")
 
 
-def process_covers(music_dir, out_dir, size):
+def write_atomic(path, data):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def cover_input_signature(mp3):
+    """封面"输入"的指纹 —— 决定这张 .cov 该不该重做。
+
+    返回 (source, sig, note)：
+      · 内嵌封面：源指纹就是 mp3 自己（mtime+size）+ 尺寸，mp3 没变就不重抠
+      · 同名图片：源指纹是那张图，换图能察觉到
+      · 没有封面：返回 (None, None, 原因)
+    """
+    raw = extract_embedded_cover(mp3)
+    if raw is not None:
+        sig = stat_sig(mp3)
+        return "内嵌", sig, "内嵌"
+
+    sidecar = find_sidecar_image(mp3)
+    if sidecar is None:
+        return None, None, "没有封面"
+
+    sig = stat_sig(sidecar)
+    return "同名图片", sig, sidecar.suffix
+
+
+def process_covers(music_dir, out_dir, size, state=None, force=False,
+                   dry_run=False):
     mp3_files = list_mp3_files(music_dir)
     if not mp3_files:
         report_where_the_songs_are(music_dir)
-        return 0, 0
+        return {"made": 0, "skip": 0, "no_cover": 0, "pending": 0}
 
-    made = 0
-    skipped = []
+    made = skip = no_cover = pending = 0
 
     for mp3 in mp3_files:
         name = mp3.stem
         cover_path = out_dir / (name + COVER_EXT)
 
-        raw = extract_embedded_cover(mp3)
-        source = "内嵌"
+        # ---- 快路径：先查清单，命中就【连 MP3 都不用读】 ----
+        # 这一步是"第二次跑秒级完成"的关键：跳过时不做任何 I/O 解码。
+        if state is not None and not force:
+            recorded = state.get(mp3)
+            if (recorded
+                    and recorded.get("kind") == "cover"
+                    and recorded.get("source_sig") == stat_sig(mp3)
+                    and recorded.get("size") == size):
+                if recorded.get("note") == "no-cover":
+                    no_cover += 1
+                    log(f"    - {name}   没有封面（上次已确认）")
+                    continue
+                if (cover_path.exists()
+                        and stat_sig(cover_path) == recorded.get("output_sig")):
+                    skip += 1
+                    log(f"    · 跳过  {name}")
+                    continue
 
+        source, sig, note = cover_input_signature(mp3)
+
+        # ---- 已经被流水线产好了？（ncm 的封面来自 .ncm 内部，mp3 里没内嵌）----
+        # pipeline.py 会先把 .cov 写到 out_dir，我们认下来并记账，不重复劳动。
+        if source is None and cover_path.exists():
+            expected = size * size * 2
+            if cover_path.stat().st_size == expected:
+                if state is not None and not dry_run:
+                    state.put(mp3, {
+                        "kind": "cover", "source_sig": stat_sig(mp3), "size": size,
+                        "output": str(cover_path),
+                        "output_sig": stat_sig(cover_path),
+                        "note": "pre-made",
+                        "when": time.strftime("%Y-%m-%d %H:%M:%S")})
+                skip += 1
+                log(f"    · 跳过  {name}   （封面已由流水线产好）")
+                continue
+
+        if source is None:
+            no_cover += 1
+            log(f"    - {name}   没有封面")
+            if state is not None and not dry_run:
+                state.put(mp3, {"kind": "cover", "source_sig": stat_sig(mp3),
+                                "size": size, "output": "", "note": "no-cover",
+                                "when": time.strftime("%Y-%m-%d %H:%M:%S")})
+            continue
+
+        if dry_run:
+            pending += 1
+            log(f"    + 需要重做  {name}   [{note}]")
+            continue
+
+        raw = extract_embedded_cover(mp3)
+        source_label = "内嵌"
         if raw is None:
             sidecar = find_sidecar_image(mp3)
-            if sidecar is None:
-                skipped.append(name)
-                log(f"    - {name}   没有封面")
-                continue
             raw = sidecar.read_bytes()
-            source = sidecar.suffix
+            source_label = sidecar.suffix
 
         try:
             image = Image.open(io.BytesIO(raw))
             image.load()
         except Exception as exc:
-            skipped.append(name)
+            no_cover += 1
             log(f"    ! {name}   图片打不开（{exc}）")
             continue
 
-        cover_path.write_bytes(image_to_rgb565(image, size))
+        write_atomic(cover_path, image_to_rgb565(image, size))
+        if source == "同名图片":
+            copy_mtime(find_sidecar_image(mp3), cover_path)
+        else:
+            copy_mtime(mp3, cover_path)
+
         size_kb = cover_path.stat().st_size / 1024
         made += 1
-        log(f"    ✔ {name}   [{source}] {image.size[0]}x{image.size[1]} -> "
+        log(f"    ✔ {name}   [{source_label}] {image.size[0]}x{image.size[1]} -> "
             f"{size}x{size}  {size_kb:.0f} KB")
 
-    return made, len(skipped)
+        if state is not None:
+            state.put(mp3, {"kind": "cover", "source_sig": sig, "size": size,
+                            "output": str(cover_path),
+                            "output_sig": stat_sig(cover_path),
+                            "when": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+    return {"made": made, "skip": skip, "no_cover": no_cover,
+            "pending": pending}
 
 
 # ============================================================================
@@ -400,6 +588,14 @@ def main():
                         help="封面边长，要和固件的 COVER_W 一致（默认 140）")
     parser.add_argument("--no-font", action="store_true", help="跳过字库")
     parser.add_argument("--no-cover", action="store_true", help="跳过封面")
+    parser.add_argument("--state", default=None,
+                        help="增量清单文件（给 pipeline.py 用；不给就不做增量记录）")
+    parser.add_argument("--default-state", action="store_true",
+                        help="用默认清单路径（给 一键备卡.cmd 用）")
+    parser.add_argument("--force", action="store_true",
+                        help="忽略清单，字库和封面全部重做")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="只说要做什么，不写盘")
     parser.add_argument("-i", "--interactive", action="store_true",
                         help="交互式提问（给双击运行的 .cmd 用，回车=用默认设置）")
     args = parser.parse_args()
@@ -456,6 +652,17 @@ def main():
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 增量清单：给路径就用；--default-state 用默认路径；
+    # 直接双击 一键备卡.cmd 时自动打开默认清单（这样日常操作也变快）
+    if args.state is None and args.default_state:
+        args.state = str(DEFAULT_STATE_FILE)
+    state = State(args.state, read_only=args.dry_run)
+    if args.state and not args.dry_run:
+        log(f"增量清单: {args.state}")
+
+    if args.dry_run:
+        log("⚠ 预演模式：只看要做什么，不写任何文件")
+
     expected_bytes = args.size * args.size * 2
     log(f"音乐目录: {music_dir}")
     log(f"输出目录: {out_dir}")
@@ -464,14 +671,20 @@ def main():
 
     if not args.no_font:
         log("[1/2] 生成中/日文字库")
-        generate_font(out_dir)
+        generate_font(out_dir, state, args.force, args.dry_run)
         log()
 
     if not args.no_cover:
         log("[2/2] 提取并转换封面")
-        made, missing = process_covers(music_dir, out_dir, args.size)
+        stats = process_covers(music_dir, out_dir, args.size, state,
+                               args.force, args.dry_run)
         log()
-        log(f"  有封面 {made} 首，没封面 {missing} 首")
+        log(f"  做了 {stats['made']} 首，跳过 {stats['skip']} 首，"
+            f"没封面 {stats['no_cover']} 首"
+            + (f"，待做 {stats['pending']} 首" if stats['pending'] else ""))
+
+    if not args.dry_run:
+        state.save()
 
     log()
     log("=" * 64)

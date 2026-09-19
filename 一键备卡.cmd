@@ -14,7 +14,8 @@ if errorlevel 1 (
 
 rem All Chinese messages come from Python on purpose:
 rem cmd.exe cannot reliably parse a UTF-8 batch file.
-python prepare_sd.py --interactive
+rem --default-state turns on the incremental manifest so re-runs skip finished work.
+python prepare_sd.py --interactive --default-state
 
 echo.
 pause
