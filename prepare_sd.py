@@ -25,6 +25,7 @@
 
 import argparse
 import io
+import re
 import struct
 import sys
 from pathlib import Path
@@ -301,6 +302,51 @@ def process_covers(music_dir, out_dir, size):
 # ============================================================================
 
 
+def ask_for_sd_drive():
+    """交互式问用户要 SD 卡盘符。给双击运行的 一键备卡.cmd 用。
+
+    所有中文都从 Python 输出，而不是写在 .cmd 里 ——
+    cmd.exe 解析 UTF-8 批处理文件不可靠，中文行会被当成命令报错。
+    """
+    print("=" * 64)
+    print("  MP3 播放器 —— SD 卡一键备卡")
+    print("=" * 64)
+    print()
+    print("  用法：先把 SD 卡插到电脑的读卡器上，再运行本程序。")
+    print("  脚本会直接读写这张卡 —— 扫卡里的 mp3、抠封面、生成字库，")
+    print("  全部原地完成，不会出现「封面和歌名对不上」的问题。")
+    print()
+    print("  盘符就是「此电脑」里那张卡显示的那个字母，比如 F、G、H。")
+    print()
+
+    try:
+        raw = input("  请输入 SD 卡盘符（只输字母，直接回车退出）: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    raw = raw.strip().rstrip(":\\/").strip()
+    return raw or None
+
+
+def normalize_dir(value):
+    """把用户给的各种写法统一成绝对目录路径。
+
+    专门处理 Windows 命令行的一个坑：
+    在 cmd 里写  --music "F:\\"  时，C 运行时会认为反斜杠把引号转义了，
+    Python 实际收到的是  F:"  （末尾多一个引号），于是找不到盘。
+    所以这里先剥掉多余的引号，再把"只有一个盘符"补成盘根。
+    """
+    value = value.strip()
+    while value.endswith('"'):
+        value = value[:-1]
+
+    if re.fullmatch(r"[A-Za-z]:", value):
+        value += "\\"
+
+    return Path(value).resolve()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="生成 SD 卡上播放器需要的字库和封面文件")
@@ -310,10 +356,37 @@ def main():
                         help="封面边长，要和固件的 COVER_W 一致（默认 140）")
     parser.add_argument("--no-font", action="store_true", help="跳过字库")
     parser.add_argument("--no-cover", action="store_true", help="跳过封面")
+    parser.add_argument("-i", "--interactive", action="store_true",
+                        help="交互式：问你要 SD 卡盘符（给双击运行的 .cmd 用）")
     args = parser.parse_args()
 
-    music_dir = Path(args.music).resolve()
-    out_dir = Path(args.out).resolve()
+    if args.interactive:
+        drive = ask_for_sd_drive()
+        if not drive:
+            print("  已取消。")
+            return 1
+        target = f"{drive}:/"
+        if not Path(target).exists():
+            print()
+            print(f"  找不到 {drive}: 盘。检查一下：")
+            print("    1) 盘符字母对不对（打开「此电脑」看那张卡的字母）")
+            print("    2) 卡有没有插好、读卡器有没有被识别")
+            return 1
+        args.music = target
+        args.out = target
+        print(f"  目标盘：{drive}:\\")
+        print()
+
+    try:
+        music_dir = normalize_dir(args.music)
+        out_dir = normalize_dir(args.out)
+    except OSError as exc:
+        raise SystemExit(f"路径解析失败：{exc}")
+
+    if not music_dir.is_dir():
+        raise SystemExit(f"找不到音乐目录：{music_dir}\n"
+                         f"（确认盘符对不对、卡插好了没有）")
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     expected_bytes = args.size * args.size * 2
@@ -335,8 +408,13 @@ def main():
 
     log()
     log("=" * 64)
-    log(f"把 {out_dir} 里的所有文件拷到 SD 卡根目录，然后重新上电即可。")
+    if music_dir == out_dir:
+        log("完成！文件已经直接写进 SD 卡了。")
+        log("把卡拔下来插回播放器，重新上电即可。")
+    else:
+        log(f"把 {out_dir} 里的所有文件拷到 SD 卡根目录，然后重新上电即可。")
     log("=" * 64)
+    return 0
 
 
 if __name__ == "__main__":

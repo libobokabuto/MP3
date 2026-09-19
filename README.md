@@ -178,18 +178,38 @@
 
 这步不做也能跑 —— 会退回 flash 里的 60 字小字库，只是歌名没中文、封面是空相框。
 
+**推荐：把 SD 卡插到电脑的读卡器上，直接对卡操作。**
+
+双击 **`一键备卡.cmd`** → 输入卡的盘符（比如 `F`）→ 回车。完事，字库和封面会
+**原地写进这张卡**，不可能出现"封面和歌名对不上"的问题。
+
+想自己敲命令的话，等价于：
+
 ```bash
 pip install pillow
+python prepare_sd.py --music F:/ --out F:/
+```
+
+> 为什么要用 `F:/` 这种正斜杠写法？因为在 cmd 里写 `"F:\"` 会被 Windows 的
+> 参数解析当成"反斜杠转义了引号"，Python 收到的是 `F:"`，整个参数就废了。
+
+**另一种：歌在电脑上，先输出到一个文件夹再手动拷**
+
+```bash
 python prepare_sd.py --music D:/CloudMusic --out D:/sd_ready
 ```
 
-跑完把 `D:/sd_ready` 里的所有文件（`font16.bin` + 一堆 `.cov`）拷到 **SD 卡根目录**。
-脚本会逐首打印处理结果，包括哪些歌没找到封面。
+跑完把 `D:/sd_ready` 里的所有文件（`font16.bin` + 一堆 `.cov`）**和 mp3 一起**
+拷到 SD 卡根目录。
+
+> ⚠️ **`.cov` 必须和对应的 `.mp3` 放在同一个文件夹，名字一模一样，不能新建子文件夹分开放。**
+> 固件是这样找封面的：`春娇与志明.mp3` → 找同目录的 `春娇与志明.cov`。
 
 | 参数 | 说明 |
 |---|---|
 | `--music` | 音乐目录（默认当前目录） |
 | `--out` | 输出目录（默认 `./sd_ready`） |
+| `-i` / `--interactive` | 交互式，问你要 SD 卡盘符（`一键备卡.cmd` 用的就是这个） |
 | `--size` | 封面边长，**改了要同步改固件里的 `COVER_W` / `COVER_H`**（默认 140） |
 | `--no-font` / `--no-cover` | 只做其中一件事 |
 
@@ -213,6 +233,7 @@ python prepare_sd.py --music D:/CloudMusic --out D:/sd_ready
 ```
 Mp3.ino                   主程序（全部逻辑都在这一个文件里）
 prepare_sd.py             PC 端"一键备卡"：生成中/日文字库 + 从 MP3 抠封面转 RGB565
+一键备卡.cmd              双击运行的入口（纯 ASCII，中文提示由 Python 输出）
 chinese_font.h            自动生成的 16×16 点阵字库（60 个界面字），不要手改
 generate_chinese_font.py  上面那个字库的生成脚本
 ```
@@ -299,6 +320,11 @@ Windows 下默认用 `simhei.ttf`（黑体，16px 下最清晰）。
 - **SPI 整块刷屏的缓冲要放内部 RAM**：`drawRGBBitmap` 最终走 SPI DMA，
   内部 RAM 才是稳妥的 DMA 源。字库（只被 CPU 逐点读）放 PSRAM 没问题，
   但封面缓冲（39 KB）特意留在内部 RAM。
+- **cmd.exe 不能可靠地解析 UTF-8 批处理文件**：`.cmd` 里写中文会被当成命令报错。
+  解法是 `.cmd` 保持纯 ASCII，所有中文提示交给 Python 打印
+  （Python 在中文 Windows 的 cmd 里 stdout 编码是 gbk，控制台也是 gbk，正好对上）。
+- **cmd 里 `--music "F:\"` 会被解析成 `F:"`**：反斜杠被当成转义引号，把后面的参数一起吞掉。
+  写 `"F:/"` 就没事。
 
 ---
 
