@@ -1,10 +1,15 @@
 /*
  * ============================================================================
- *  MP3 播放器 —— v2.1.1 三页面导航 + 版式重排 + 暂停修复
+ *  MP3 播放器 —— v2.2 + v2.4 中/日文歌名 + 封面
  * ============================================================================
  *
  *  硬件：ESP32-S3-DevKitC-1 + ST7789(240x240) + TF卡(SPI) + MAX98357A(I2S) + 3按键
  *  库  ：ESP8266Audio / Adafruit_ST7789 / Adafruit_GFX / SD(ESP32核心自带)
+ *
+ *  ── 上手前先做一件事 ──────────────────────────────────────────────────────
+ *   在 PC 上跑一次  python prepare_sd.py --music <音乐目录> --out <输出目录>
+ *   把输出目录里的东西（font16.bin + 一堆 .cov）拷到 SD 卡根目录，再上电。
+ *   不跑也能用：会退回 flash 里的 60 字小字库，只是歌名没中文、封面是空相框。
  *
  *  ── 三个页面 ──────────────────────────────────────────────────────────────
  *
@@ -23,48 +28,36 @@
  *       B2 -> 音量 +（长按连调）   B3 -> 音量 -（长按连调）
  *       B1 短按 -> 回到页面1
  *
- *  ── v2.1.1 改了什么 ──────────────────────────────────────────────────────
- *   ✔ 【修 bug】暂停不再"重复最后一个音节"：
- *      旧实现是"停止调用 mp3->loop()"，但 ESP32 的 I2S 是 DMA 环形缓冲，
- *      主循环一停填充，硬件就把最后一个 DMA 描述符反复重放。
- *      现在改成暂停期间持续往 I2S 灌静音（feedSilence()）：
- *      DMA 一直在流动，解码器原地不动，恢复时从原位置接着放。
- *   ✔ 【版式重排】三条原则：
- *      1) 一屏一个视觉重心 —— 播放页主角是 140x140 的封面，不再是信息栏
- *      2) 删掉只有工程师才需要的信息：SD OK / 共 N 首 / 音量 N / "播放页"标题
- *         （SD 状态搬到设置页；音量只在设置页看）
- *      3) 少画框，用亮度和留白做层级 —— 全局只有 16px 一种字号，
- *         不靠留白和对齐就完全没层级
- *   ✔ 播放状态改用一个彩色小圆点表达（绿=播放中 / 橙=已暂停 / 暗灰=就绪），
- *      不再是一整条又大又吵的彩色横幅
- *   ✔ 顶部状态行右侧每秒只刷一小块走秒，不重画整行
- *   ✔ 列表页从 6 行加到 7 行（顶部标题栏腾出来的空间）
- *   ✔ 底部提示只留一行（三个按钮的短按功能），去掉常驻的长按说明
+ *  ── v2.2 中/日文歌名 ──────────────────────────────────────────────────────
+ *   字库放 SD 卡（font16.bin，约 680KB），开机【一次性读进 PSRAM】。
+ *   覆盖 U+00A0-00FF / 2000-206F / 3000-30FF / 4E00-9FFF / FF00-FFEF 共约 21600 字。
+ *   实测确认过 ESP32 的 SD 库返回的就是标准 UTF-8，所以不需要任何转码。
+ *   汉字取自 simhei.ttf，假名取自 msgothic.ttc。
+ *   查不到的冷门码位（比如 U+1407 ᐇ）画一个空心"豆腐块"，不再是一片空白。
  *
- *  ⚠️ 【已知取舍】去掉长按说明之后，"长按2进列表 / 长按3进设置" 变成了隐藏手势，
- *     新上手的人不会知道。如果以后觉得难发现，两个低成本的补救办法：
- *       1) 开机后前 3 秒在底部显示一次长按说明，之后自动消失
- *       2) 列表页/设置页的返回手势改成短按，只保留进入时的长按
- *
- *   ⚠️ 进度条暂时删掉了。原因：原来的进度是假的 ——
- *      width = (elapsed / 250) % 212，每 53 秒回零，跟歌长毫无关系。
- *      要做真的，得解析 MP3 帧头算时长（CBR 下 duration ≈ 音频字节数*8/比特率），
- *      那是独立的一步，别和这次改动混在一起。
+ *  ── v2.4 封面 ─────────────────────────────────────────────────────────────
+ *   封面在 PC 端就转成 140x140 的 RGB565 原始数据，存成 <歌名>.cov。
+ *   板子只做"一次顺序读 + 一次整块刷屏"（约 20ms @ SPI 16MHz）。
+ *   这样固件里不用塞图片解码器，也不会因为解码把音频卡爆。
+ *   来源优先级：MP3 内嵌 ID3 封面 -> 同名 .jpg/.png/.bmp -> 没有就画空相框。
  *
  *  ── 已实现 / 未实现 ────────────────────────────────────────────────────────
  *   ✔ 按钮事件抽象（短按 / 长按 / 长按连发）
  *   ✔ 三页面状态机；列表页光标与"正在播放的曲目"分离
- *   ✔ 真·暂停；音量存 NVS（停手 800ms 才落盘，省闪存寿命）
+ *   ✔ 真·暂停（暂停期间持续往 I2S 灌静音，避免 DMA 重放最后一个缓冲）
+ *   ✔ 音量存 NVS（停手 800ms 才落盘，省闪存寿命）
+ *   ✔ 中/日文歌名（SD 全字库 -> PSRAM）+ 缺字豆腐块
+ *   ✔ 封面图（PC 预处理 + 一次 blit）
  *   ✔ 歌名跑马灯画在整屏宽度的独立横条里（屏幕边界天然就是裁剪边界）
  *   ✔ 列表页歌名按 UTF-8 字符边界截断 + "…"，不会切出半个汉字
  *   ✔ 重绘过程穿插 serviceAudio()，避免 UI 阻塞导致音频 underrun
- *   ✔ 文件名 hex dump（v2.0 诊断），用来确认 SD 库返回的是不是 UTF-8
+ *   ✔ 文件名 hex dump（v2.0 诊断，已确认编码为 UTF-8）
  *
- *   ✘ 中文/日文歌名 —— 等 hex dump 确认编码后做 SD 全字库（v2.2）
- *   ✘ 封面图 —— 旧的 drawBmpCover() 逐像素 seek，慢到不可用，
- *                本版先关掉（ENABLE_BMP_COVER=0），v2.4 重做
- *   ✘ 真实进度条 / 时长解析
+ *   ✘ 真实进度条 / 时长解析（原来的进度是假的，已移除）
  *   ✘ 列表超过 MAX_TRACKS 首 / 子目录 / 排序 —— v2.5
+ *   ✘ 大字号排版 —— 现在全局只有 16px 一种字号，层级只能靠留白做
+ *
+ *  ⚠️ 【已知取舍】"长按2进列表 / 长按3进设置" 是隐藏手势，界面上没有常驻提示
  * ============================================================================
  */
 
@@ -74,6 +67,7 @@
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
+#include "esp_heap_caps.h"
 #include "chinese_font.h"
 #include "AudioFileSourceSD.h"
 #include "AudioGeneratorMP3.h"
@@ -89,8 +83,9 @@
 // 编码确认完，把这个改成 0 就能关掉。
 #define DEBUG_FILENAME_HEX 1
 
-// 封面图：旧实现慢到不可用（见文件头注释），v2.4 重做前先关掉。
-#define ENABLE_BMP_COVER 0
+// SD 卡上的成品文件名 —— 都由 PC 端 prepare_sd.py 生成，拷到卡根目录
+#define FONT_FILE "/font16.bin"  // 中/日文全字库（约 680KB），开机载入 PSRAM
+#define COVER_EXT ".cov"         // 封面：<歌名>.cov，140x140 的 RGB565 原始数据
 
 // ============================================================================
 // 引脚
@@ -278,6 +273,151 @@ void drawCurrentPage();
 void drawPlayerStatusBar();
 
 // ============================================================================
+// SD 卡全字库（中/日文歌名靠它）
+// ============================================================================
+//
+// 为什么字库放 SD 卡而不是塞 flash：
+//   16x16 全字库约 680KB。塞 flash 会让编译变慢、换字体要重烧，而且以后想加
+//   24/32 号大字就彻底放不下了。放 SD 卡 + 开机一次性读进 PSRAM（板子有 8MB），
+//   换字体只是换个文件。
+//
+// 文件格式（由 prepare_sd.py 生成）：
+//   头部 16 字节:  "MPF1" + 字宽u16 + 字高u16 + 每字字节数u16 + 段数u16 + 保留u32
+//   段表 12×N:     起始码点u32 + 结束码点u32 + 数据偏移u32
+//   字形数据:      每字 32 字节 = 16 行 × 2 字节（高字节在左，bit15 = 最左像素）
+
+struct FontSegment {
+  uint32_t startCodepoint;
+  uint32_t endCodepoint;
+  uint32_t dataOffset;
+};
+
+const int MAX_FONT_SEGMENTS = 8;
+
+uint8_t *sdFontData = nullptr;      // 字库整块（PSRAM）
+uint32_t sdFontSize = 0;
+uint16_t sdFontSegmentCount = 0;
+FontSegment sdFontSegments[MAX_FONT_SEGMENTS];
+
+uint16_t readLeU16(const uint8_t *p) {
+  return static_cast<uint16_t>(p[0]) |
+         static_cast<uint16_t>(static_cast<uint16_t>(p[1]) << 8);
+}
+
+uint32_t readLeU32(const uint8_t *p) {
+  return static_cast<uint32_t>(p[0]) |
+         (static_cast<uint32_t>(p[1]) << 8) |
+         (static_cast<uint32_t>(p[2]) << 16) |
+         (static_cast<uint32_t>(p[3]) << 24);
+}
+
+// 一行 2 字节，高字节 = 左边 8 像素
+uint16_t sdGlyphRow(const uint8_t *glyph, int row) {
+  return static_cast<uint16_t>(
+      (static_cast<uint16_t>(glyph[row * 2]) << 8) | glyph[row * 2 + 1]);
+}
+
+// 返回该码点的 32 字节点阵指针；不在字库里返回 nullptr
+const uint8_t *sdGlyphFor(uint32_t codepoint) {
+  if (!sdFontData) {
+    return nullptr;
+  }
+
+  for (uint16_t i = 0; i < sdFontSegmentCount; i++) {
+    if (codepoint < sdFontSegments[i].startCodepoint ||
+        codepoint > sdFontSegments[i].endCodepoint) {
+      continue;
+    }
+
+    uint32_t offset = sdFontSegments[i].dataOffset +
+                      (codepoint - sdFontSegments[i].startCodepoint) * 32U;
+
+    if (offset + 32U > sdFontSize) {
+      return nullptr;
+    }
+
+    return sdFontData + offset;
+  }
+
+  return nullptr;
+}
+
+// 载入失败不算错误：界面文案仍然由 flash 里的 60 字小字库兜底，只是歌名没中文
+bool loadSdFont() {
+  if (!sdOk) {
+    return false;
+  }
+
+  File file = SD.open(FONT_FILE, FILE_READ);
+  if (!file) {
+    Serial.println("font16.bin not found (歌名将没有中文)");
+    return false;
+  }
+
+  uint32_t size = file.size();
+  if (size < 16 || size > 4UL * 1024 * 1024) {
+    Serial.println("font16.bin: 文件大小不对");
+    file.close();
+    return false;
+  }
+
+  // 优先放 PSRAM（8MB 闲着也是闲着），不行再退回内部 RAM
+  uint8_t *buffer = static_cast<uint8_t *>(
+      heap_caps_malloc(size, MALLOC_CAP_SPIRAM));
+  if (!buffer) {
+    buffer = static_cast<uint8_t *>(malloc(size));
+  }
+  if (!buffer) {
+    Serial.println("font16.bin: 内存不够");
+    file.close();
+    return false;
+  }
+
+  unsigned long startedMs = millis();
+  size_t got = file.read(buffer, size);
+  file.close();
+
+  if (got != size || memcmp(buffer, "MPF1", 4) != 0) {
+    Serial.println("font16.bin: 读取失败或格式不对");
+    free(buffer);
+    return false;
+  }
+
+  uint16_t glyphWidth = readLeU16(buffer + 4);
+  uint16_t glyphHeight = readLeU16(buffer + 6);
+  uint16_t bytesPerGlyph = readLeU16(buffer + 8);
+  uint16_t segmentCount = readLeU16(buffer + 10);
+
+  if (glyphWidth != 16 || glyphHeight != 16 || bytesPerGlyph != 32 ||
+      segmentCount == 0 || segmentCount > MAX_FONT_SEGMENTS ||
+      16U + static_cast<uint32_t>(segmentCount) * 12U > size) {
+    Serial.println("font16.bin: 头部参数不支持");
+    free(buffer);
+    return false;
+  }
+
+  for (uint16_t i = 0; i < segmentCount; i++) {
+    const uint8_t *entry = buffer + 16 + i * 12;
+    sdFontSegments[i].startCodepoint = readLeU32(entry);
+    sdFontSegments[i].endCodepoint = readLeU32(entry + 4);
+    sdFontSegments[i].dataOffset = readLeU32(entry + 8);
+  }
+
+  sdFontData = buffer;
+  sdFontSize = size;
+  sdFontSegmentCount = segmentCount;
+
+  Serial.print("font16.bin OK: ");
+  Serial.print(size / 1024);
+  Serial.print(" KB, ");
+  Serial.print(segmentCount);
+  Serial.print(" 段, 耗时 ");
+  Serial.print(millis() - startedMs);
+  Serial.println(" ms");
+  return true;
+}
+
+// ============================================================================
 // UTF-8 与文字绘制
 // ============================================================================
 
@@ -379,6 +519,49 @@ String fitText(const String &text, int maxWidth) {
 bool sServicingAudio = false;
 int sGlyphsSinceService = 0;
 
+// 画一个 16x16 点阵字。字形来源依次尝试：
+//   1. SD 卡全字库    —— 中/日文歌名走这里
+//   2. flash 内置小字库 —— 固定界面文案；SD 字库没载入时也保证 UI 有中文
+//   3. 都没有 —— 画一个空心方块（印刷里的"豆腐块"），而不是像以前那样留一片空白。
+//      像 U+1407 (ᐇ) 这种冷门码位就走这条，至少让人知道"这里有个字渲染不出来"
+void drawWideGlyph(uint32_t codepoint, int16_t x, int16_t y, uint16_t color) {
+  const uint8_t *sdGlyph = sdGlyphFor(codepoint);
+
+  if (sdGlyph) {
+    for (int row = 0; row < 16; row++) {
+      uint16_t bits = sdGlyphRow(sdGlyph, row);
+      if (!bits) {
+        continue;
+      }
+      for (int column = 0; column < 16; column++) {
+        if (bits & (1U << (15 - column))) {
+          tft.drawPixel(x + column, y + row, color);
+        }
+      }
+    }
+    return;
+  }
+
+  const ChineseGlyph *flashGlyph = findChineseGlyph(codepoint);
+
+  if (flashGlyph) {
+    for (int row = 0; row < 16; row++) {
+      uint16_t bits = flashGlyph->rows[row];
+      if (!bits) {
+        continue;
+      }
+      for (int column = 0; column < 16; column++) {
+        if (bits & (1U << (15 - column))) {
+          tft.drawPixel(x + column, y + row, color);
+        }
+      }
+    }
+    return;
+  }
+
+  tft.drawRect(x + 3, y + 3, 10, 10, color);
+}
+
 void drawUtf8Text(const char *text, int16_t x, int16_t y, uint16_t color,
                   uint16_t background) {
   size_t index = 0;
@@ -391,20 +574,7 @@ void drawUtf8Text(const char *text, int16_t x, int16_t y, uint16_t color,
       tft.drawChar(x, y, static_cast<char>(codepoint), color, background, 1);
       x += 6;
     } else {
-      const ChineseGlyph *glyph = findChineseGlyph(codepoint);
-      if (glyph) {
-        for (int row = 0; row < 16; row++) {
-          uint16_t bits = glyph->rows[row];
-          if (!bits) {
-            continue;
-          }
-          for (int column = 0; column < 16; column++) {
-            if (bits & (1U << (15 - column))) {
-              tft.drawPixel(x + column, y + row, color);
-            }
-          }
-        }
-      }
+      drawWideGlyph(codepoint, x, y, color);
       x += 16;
     }
 
@@ -600,7 +770,7 @@ String coverPathForTrack(const String &path) {
     coverPath.remove(dotIndex);
   }
 
-  coverPath += ".bmp";
+  coverPath += COVER_EXT;  // ".cov"
   return coverPath;
 }
 
@@ -810,88 +980,49 @@ void togglePlayPause() {
 }
 
 // ============================================================================
-// 封面图（v2.4 重做，本版关掉）
+// 封面（v2.4）
 // ============================================================================
+//
+// 这里【不做解码】—— JPEG 解码和缩放都在 PC 端由 prepare_sd.py 做完，
+// 板子只干两件事：一次顺序读 + 一次整块刷屏。
+// 好处：固件里不用塞图片解码器，也不会因为解码把音频卡爆。
+// 代价：往卡里加新歌要重跑一次 prepare_sd.py。
 
-#if ENABLE_BMP_COVER
-uint16_t readLe16(File &file) {
-  uint16_t value = file.read();
-  value |= static_cast<uint16_t>(file.read()) << 8;
-  return value;
-}
+// 封面缓冲放在【内部 RAM】而不是 PSRAM：整块刷屏最终走 SPI DMA，
+// 内部 RAM 才是稳妥的 DMA 源。140*140*2 = 39200 字节，内部 RAM 够用。
+uint16_t coverBuffer[COVER_W * COVER_H];
 
-uint32_t readLe32(File &file) {
-  uint32_t value = static_cast<uint32_t>(file.read());
-  value |= static_cast<uint32_t>(file.read()) << 8;
-  value |= static_cast<uint32_t>(file.read()) << 16;
-  value |= static_cast<uint32_t>(file.read()) << 24;
-  return value;
-}
+// 把 <歌名>.cov 读进缓冲。分块读并穿插 serviceAudio()，避免长时间不喂音频。
+bool loadCoverForTrack(const String &audioPath) {
+  if (!sdOk) {
+    return false;
+  }
 
-// 警告：现在的实现每个输出像素都 seek 一次（82x82 = 6724 次），
-// 在 SPI 4MHz 的 SD 卡上要好几秒，且会把音频卡死。v2.4 会改成
-// "按行预读 -> 转 RGB565 缓冲 -> 一次 drawRGBBitmap"。
-bool drawBmpCover(const String &path, int16_t x, int16_t y, int16_t width,
-                  int16_t height) {
-  File file = SD.open(path.c_str(), FILE_READ);
+  File file = SD.open(coverPathForTrack(audioPath).c_str(), FILE_READ);
   if (!file) {
     return false;
   }
 
-  if (readLe16(file) != 0x4D42) {
+  if (file.size() != sizeof(coverBuffer)) {
     file.close();
     return false;
   }
 
-  readLe32(file);
-  readLe32(file);
-  uint32_t pixelDataOffset = readLe32(file);
-  uint32_t dibSize = readLe32(file);
-  if (dibSize < 40) {
-    file.close();
-    return false;
-  }
+  uint8_t *target = reinterpret_cast<uint8_t *>(coverBuffer);
+  size_t total = 0;
 
-  int32_t sourceWidth = static_cast<int32_t>(readLe32(file));
-  int32_t sourceHeight = static_cast<int32_t>(readLe32(file));
-  uint16_t planes = readLe16(file);
-  uint16_t bitsPerPixel = readLe16(file);
-  uint32_t compression = readLe32(file);
-
-  if (sourceWidth <= 0 || sourceHeight == 0 || planes != 1 ||
-      bitsPerPixel != 24 || compression != 0) {
-    file.close();
-    return false;
-  }
-
-  bool topDown = sourceHeight < 0;
-  int32_t absoluteHeight = sourceHeight < 0 ? -sourceHeight : sourceHeight;
-  uint32_t rowSize = (static_cast<uint32_t>(sourceWidth) * 3 + 3) & ~3U;
-
-  for (int16_t outputY = 0; outputY < height; outputY++) {
-    int32_t sourceY = (static_cast<int32_t>(outputY) * absoluteHeight) / height;
-    if (!topDown) {
-      sourceY = absoluteHeight - 1 - sourceY;
+  while (total < sizeof(coverBuffer)) {
+    size_t got = file.read(target + total, 4096);
+    if (got == 0) {
+      break;
     }
-
-    for (int16_t outputX = 0; outputX < width; outputX++) {
-      int32_t sourceX = (static_cast<int32_t>(outputX) * sourceWidth) / width;
-      uint32_t pixelOffset = pixelDataOffset +
-                             static_cast<uint32_t>(sourceY) * rowSize +
-                             static_cast<uint32_t>(sourceX) * 3;
-      file.seek(pixelOffset);
-
-      uint8_t blue = file.read();
-      uint8_t green = file.read();
-      uint8_t red = file.read();
-      tft.drawPixel(x + outputX, y + outputY, tft.color565(red, green, blue));
-    }
+    total += got;
+    serviceAudio();
   }
 
   file.close();
-  return true;
+  return total == sizeof(coverBuffer);
 }
-#endif
 
 // ============================================================================
 // 状态文字
@@ -970,21 +1101,19 @@ void drawTopLabel(const char *leftText, const char *rightText,
 // ============================================================================
 
 void drawAlbumArt() {
-  // 占位块：一块很暗的底 + 一条灰边框，看起来像"还没放封面的空相框"，
-  // 而不是原来那种蓝底白框再写 MP3 / I2S 的调试画面（I2S 是内部总线名，
-  // 用户根本不该在界面上看到）。
-  tft.fillRect(COVER_X, COVER_Y, COVER_W, COVER_H, COLOR_BOX_FILL);
-  tft.drawRect(COVER_X, COVER_Y, COVER_W, COVER_H, COLOR_BOX_LINE);
-
-#if ENABLE_BMP_COVER
-  if (trackCount > 0 &&
-      drawBmpCover(coverPathForTrack(currentTrackPath()), COVER_X, COVER_Y,
-                   COVER_W, COVER_H)) {
-    tft.drawRect(COVER_X, COVER_Y, COVER_W, COVER_H, ST77XX_WHITE);
+  // 优先画真封面：PC 端已经把它转成 140x140 的 RGB565 原始数据，
+  // 这里只需要一次顺序读 + 一次整块刷屏（约 20ms @ SPI 16MHz）
+  if (trackCount > 0 && loadCoverForTrack(currentTrackPath())) {
+    tft.drawRGBBitmap(COVER_X, COVER_Y, coverBuffer, COVER_W, COVER_H);
+    tft.drawRect(COVER_X, COVER_Y, COVER_W, COVER_H, COLOR_BOX_LINE);
     return;
   }
-#endif
 
+  // 没有 <歌名>.cov 就画个空相框。
+  // 注意别再往封面里写 MP3 / I2S 之类的字样 —— I2S 是芯片内部总线名，
+  // 用户不该在界面上看到它（这是上一版被吐槽的点之一）。
+  tft.fillRect(COVER_X, COVER_Y, COVER_W, COVER_H, COLOR_BOX_FILL);
+  tft.drawRect(COVER_X, COVER_Y, COVER_W, COVER_H, COLOR_BOX_LINE);
   drawUtf8TextCentered("无封面", COVER_X + COVER_W / 2, COVER_Y + COVER_H - 30,
                        COLOR_BOX_LINE, COLOR_BOX_FILL);
 }
@@ -1530,6 +1659,14 @@ void setup() {
   loadSettings();
 
   initSdCard();
+
+  // 载入中/日文全字库（约 680KB，读进 PSRAM，SD 时钟 4MHz 下大概 1~2 秒）。
+  // 载入失败不影响使用：界面文案靠 flash 里那 60 个字兜底，只是歌名没中文。
+  if (sdOk) {
+    tft.fillScreen(ST77XX_BLACK);
+    drawUtf8TextCentered("载入字库", 120, 110, ST77XX_WHITE, ST77XX_BLACK);
+  }
+  loadSdFont();
 
   audioOut = new AudioOutputI2S();
   audioOut->SetPinout(I2S_BCLK, I2S_LRC, I2S_DIN);

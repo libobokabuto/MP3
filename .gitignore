@@ -9,5 +9,8 @@ build/
 __pycache__/
 *.pyc
 
+# prepare_sd.py 的产出（字体 678KB + 每首一个 38KB 封面），是成品不是源码
+sd_ready/
+
 # 学习笔记暂不上传。想一起传就把下面这行删掉。
 docs/
